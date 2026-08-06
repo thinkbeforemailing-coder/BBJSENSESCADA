@@ -18,6 +18,12 @@ from offline_buffer import (
 )
 from device_status import write_device_status
 from config_cache import read_config_cache, write_config_cache
+from gateway_commands import (
+    VALID_COMMAND_TYPES,
+    ack_command,
+    fetch_pending_commands,
+    find_writable_tag,
+)
 from settings import (
     API_BASE_URL,
     CONFIG_REFRESH_SECONDS,
@@ -40,6 +46,7 @@ MODBUS_SERIAL_LOCK = threading.Lock()
 BUFFER_RESEND_INTERVAL_SECONDS = 10
 BUFFER_RESEND_BATCH_SIZE = 100
 DEVICE_STATUS_WRITE_INTERVAL_SECONDS = 5
+COMMANDS_POLL_INTERVAL_SECONDS = 60
 
 RTU_COMMUNICATION_TYPES = {"modbus rtu", "serial", "rtu", ""}
 TCP_COMMUNICATION_TYPES = {"modbus tcp", "tcp"}
@@ -573,6 +580,170 @@ def run_device(
 
         lock.release()
 
+def write_command_value(
+    client: ModbusSerialClient | ModbusTcpClient,
+    tag: dict,
+    command_type: str,
+    value: Any,
+    slave_id: int,
+) -> None:
+    register_address = int(tag["register_address"])
+
+    if command_type == "write_register":
+
+        if int(tag.get("function_code") or 3) == 4:
+            raise ValueError(
+                "Tag is an input register (function_code=4); "
+                "input registers are read-only in Modbus and "
+                "cannot be written"
+            )
+
+        result = client.write_register(
+            address=register_address,
+            value=int(value),
+            device_id=slave_id,
+        )
+
+    elif command_type == "write_coil":
+        result = client.write_coil(
+            address=register_address,
+            value=bool(value),
+            device_id=slave_id,
+        )
+
+    else:
+        raise ValueError(f"Unsupported command type: {command_type}")
+
+    if result.isError():
+        raise RuntimeError(f"Modbus write error: {result}")
+
+
+def execute_command(
+    command: dict,
+    configuration: dict,
+) -> None:
+    command_id = command.get("command_id")
+    command_type = str(command.get("command_type") or "")
+    value = command.get("value")
+
+    try:
+        device_id = int(command["device_id"])
+        tag_id = int(command["tag_id"])
+    except (KeyError, TypeError, ValueError) as error:
+        logger.error(
+            "Command=%s | Rejected: malformed device_id/tag_id | error=%s",
+            command_id,
+            error,
+        )
+        ack_command(command_id, "failed", f"Malformed command: {error}")
+        return
+
+    if command_type not in VALID_COMMAND_TYPES:
+        logger.error(
+            "Command=%s | Rejected: unsupported command_type=%s",
+            command_id,
+            command_type,
+        )
+        ack_command(
+            command_id,
+            "failed",
+            f"Unsupported command_type: {command_type}",
+        )
+        return
+
+    device, tag = find_writable_tag(configuration, device_id, tag_id)
+
+    if device is None or tag is None:
+        logger.error(
+            "Command=%s | Rejected: device=%s tag=%s not found "
+            "or not marked writable",
+            command_id,
+            device_id,
+            tag_id,
+        )
+        ack_command(
+            command_id,
+            "failed",
+            "Tag not found or not marked writable",
+        )
+        return
+
+    device_id_int = int(device["id"])
+
+    lock = DEVICE_LOCKS.setdefault(device_id_int, threading.Lock())
+
+    client = None
+
+    with lock:
+        try:
+            connection = device.get("connection") or {}
+
+            communication_type = (
+                str(device.get("communication_type") or "")
+                .strip()
+                .lower()
+                .replace("_", " ")
+                .replace("-", " ")
+            )
+
+            is_serial = communication_type in RTU_COMMUNICATION_TYPES
+
+            bus_lock = (
+                MODBUS_SERIAL_LOCK
+                if is_serial
+                else contextlib.nullcontext()
+            )
+
+            with bus_lock:
+
+                client = create_modbus_client(
+                    communication_type=communication_type,
+                    connection=connection,
+                )
+
+                if not client.connect():
+                    raise ConnectionError(
+                        "Unable to connect to device "
+                        f"{device.get('device_name')}"
+                    )
+
+                slave_id = int(connection.get("slave_id") or 1)
+
+                write_command_value(
+                    client=client,
+                    tag=tag,
+                    command_type=command_type,
+                    value=value,
+                    slave_id=slave_id,
+                )
+
+        except Exception as error:
+            logger.error(
+                "Command=%s | Device=%s | Tag=%s | Execution failed: %s",
+                command_id,
+                device.get("device_name"),
+                tag.get("display_name"),
+                error,
+            )
+            ack_command(command_id, "failed", str(error))
+            return
+
+        finally:
+            if client is not None:
+                client.close()
+
+    logger.info(
+        "Command=%s | Device=%s | Tag=%s | Executed successfully | "
+        "command_type=%s | value=%s",
+        command_id,
+        device.get("device_name"),
+        tag.get("display_name"),
+        command_type,
+        value,
+    )
+    ack_command(command_id, "success")
+
+
 def main() -> None:
     initialize_database()
 
@@ -590,6 +761,7 @@ def main() -> None:
     last_config_download = 0.0
     last_buffer_resend = 0.0
     last_device_status_write = 0.0
+    last_commands_poll = 0.0
     last_poll_times: dict = {}
 
     while True:
@@ -659,6 +831,26 @@ def main() -> None:
                     )
 
                 last_device_status_write = current_time
+
+            if (
+                current_time - last_commands_poll
+                >= COMMANDS_POLL_INTERVAL_SECONDS
+            ):
+                try:
+                    pending_commands = fetch_pending_commands()
+
+                    for command in pending_commands:
+                        execute_command(
+                            command=command,
+                            configuration=configuration,
+                        )
+                except Exception as error:
+                    logger.exception(
+                        "Command processing error: %s",
+                        error,
+                    )
+
+                last_commands_poll = current_time
 
         except requests.RequestException as error:
             logger.error(
