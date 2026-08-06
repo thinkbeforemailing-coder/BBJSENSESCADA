@@ -5,6 +5,7 @@ import time
 import psutil
 import requests
 
+from device_status import read_device_counts
 from logging_config import setup_logger
 
 
@@ -47,6 +48,8 @@ def get_uptime_seconds() -> int:
 
 def build_health_payload() -> dict:
     """Collect current gateway health information."""
+    connected_devices, failed_devices = read_device_counts()
+
     return {
         "gateway_id": GATEWAY_ID,
         "gateway_name": GATEWAY_NAME,
@@ -55,8 +58,8 @@ def build_health_payload() -> dict:
         "memory_percent": psutil.virtual_memory().percent,
         "disk_percent": psutil.disk_usage("C:\\").percent,
         "uptime_seconds": get_uptime_seconds(),
-        "connected_devices": 1,
-        "failed_devices": 0,
+        "connected_devices": connected_devices,
+        "failed_devices": failed_devices,
         "ip_address": get_ip_address(),
         "hostname": socket.gethostname(),
         "operating_system": (

@@ -17,6 +17,7 @@ from offline_buffer import (
     mark_message_failed,
     mark_message_sent,
 )
+from device_status import write_device_status
 
 
 API_BASE_URL = "http://34.131.199.29:8000"
@@ -39,6 +40,9 @@ DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
 BUFFER_RESEND_INTERVAL_SECONDS = 10
 BUFFER_RESEND_BATCH_SIZE = 100
+DEVICE_STATUS_WRITE_INTERVAL_SECONDS = 5
+
+DEVICE_STATUS: dict[int, str] = {}
 
 logger = setup_logger(
     logger_name="telemetry-poller",
@@ -447,6 +451,7 @@ def run_device(
                 device.get("device_name"),
                 communication_type,
             )
+            DEVICE_STATUS[device_id] = "failed"
             return
 
 
@@ -459,6 +464,8 @@ def run_device(
                     "Unable to connect to serial port "
                     f"{connection.get('serial_port')}"
                 )
+
+            DEVICE_STATUS[device_id] = "connected"
 
 
             try:
@@ -520,6 +527,10 @@ def run_device(
                 client.close()
 
 
+    except Exception:
+        DEVICE_STATUS[device_id] = "failed"
+        raise
+
     finally:
 
         lock.release()
@@ -533,6 +544,7 @@ def main() -> None:
     configuration: dict = {}
     last_config_download = 0.0
     last_buffer_resend = 0.0
+    last_device_status_write = 0.0
     last_poll_times: dict = {}
 
     while True:
@@ -586,6 +598,20 @@ def main() -> None:
                         device.get("device_name"),
                         error,
                     )
+
+            if (
+                current_time - last_device_status_write
+                >= DEVICE_STATUS_WRITE_INTERVAL_SECONDS
+            ):
+                try:
+                    write_device_status(DEVICE_STATUS)
+                except Exception as error:
+                    logger.error(
+                        "Failed to write device status: %s",
+                        error,
+                    )
+
+                last_device_status_write = current_time
 
         except requests.RequestException as error:
             logger.error(

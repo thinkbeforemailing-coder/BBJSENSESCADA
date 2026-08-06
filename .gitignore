@@ -8,3 +8,5 @@ logs/
 gateway_buffer.db
 gateway_buffer.db-shm
 gateway_buffer.db-wal
+device_status.json
+device_status.json.tmp
