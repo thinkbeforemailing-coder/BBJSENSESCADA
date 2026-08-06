@@ -1,5 +1,4 @@
 import json
-import logging
 import sqlite3
 import threading
 import uuid
@@ -7,11 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from logging_config import setup_logger
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE_PATH = BASE_DIR / "gateway_buffer.db"
 
-logger = logging.getLogger("bbj-sense-offline-buffer")
+logger = setup_logger(
+    logger_name="bbj-sense-offline-buffer",
+    log_filename="telemetry_poller.log",
+)
 
 _database_lock = threading.Lock()
 

@@ -1,12 +1,16 @@
 import json
-import logging
 from pathlib import Path
+
+from logging_config import setup_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DEVICE_STATUS_PATH = BASE_DIR / "device_status.json"
 
-logger = logging.getLogger("bbj-sense-device-status")
+logger = setup_logger(
+    logger_name="bbj-sense-device-status",
+    log_filename="gateway_health.log",
+)
 
 
 def write_device_status(status_by_device: dict[int, str]) -> None:

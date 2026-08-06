@@ -1,12 +1,16 @@
 import json
-import logging
 from pathlib import Path
+
+from logging_config import setup_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_CACHE_PATH = BASE_DIR / "config_cache.json"
 
-logger = logging.getLogger("bbj-sense-config-cache")
+logger = setup_logger(
+    logger_name="bbj-sense-config-cache",
+    log_filename="telemetry_poller.log",
+)
 
 
 def write_config_cache(configuration: dict) -> None:
