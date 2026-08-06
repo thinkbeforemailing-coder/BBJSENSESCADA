@@ -357,15 +357,6 @@ def delete_sent_messages(
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format=(
-            "%(asctime)s | "
-            "%(levelname)s | "
-            "%(message)s"
-        ),
-    )
-
     initialize_database()
 
     print(f"Database: {DATABASE_PATH}")

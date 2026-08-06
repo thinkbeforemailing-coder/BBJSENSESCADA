@@ -1,0 +1,8 @@
+[lint]
+# Real correctness checks only (pyflakes + core pycodestyle errors) --
+# not the opinionated style/complexity rule families (import sorting,
+# blind-except, etc.), since several of those flag deliberate patterns
+# already established in this codebase (e.g. a broad `except Exception`
+# in the main poll loop so one bad device/tag doesn't crash the
+# gateway).
+select = ["E4", "E7", "E9", "F"]
