@@ -1,4 +1,5 @@
 import logging
+import os
 from logging_config import setup_logger
 import struct
 import time
@@ -20,7 +21,14 @@ from offline_buffer import (
 
 API_BASE_URL = "http://34.131.199.29:8000"
 
-GATEWAY_KEY = "REDACTED-KEY-ROTATED-2026-08-06"
+GATEWAY_KEY = os.environ.get("BBJ_GATEWAY_KEY")
+
+if not GATEWAY_KEY:
+    raise RuntimeError(
+        "BBJ_GATEWAY_KEY environment variable is not set. "
+        "Set it before starting the gateway."
+    )
+
 CONFIG_URL = f"{API_BASE_URL}/gateway/config"
 TELEMETRY_URL = f"{API_BASE_URL}/gateway/telemetry/"
 
