@@ -17,6 +17,7 @@ from offline_buffer import (
     mark_message_sent,
 )
 from device_status import write_device_status
+from config_cache import read_config_cache, write_config_cache
 from settings import (
     API_BASE_URL,
     CONFIG_REFRESH_SECONDS,
@@ -578,7 +579,14 @@ def main() -> None:
     logger.info("BBJ Sense Dynamic Gateway starting")
     logger.info("Cloud API: %s", API_BASE_URL)
 
-    configuration: dict = {}
+    configuration: dict = read_config_cache() or {}
+
+    if configuration:
+        logger.info(
+            "Loaded cached configuration: %s device(s)",
+            configuration.get("device_count", 0),
+        )
+
     last_config_download = 0.0
     last_buffer_resend = 0.0
     last_device_status_write = 0.0
@@ -617,6 +625,8 @@ def main() -> None:
             ):
                 configuration = download_configuration()
                 last_config_download = current_time
+
+                write_config_cache(configuration)
 
                 logger.info(
                     "Configuration loaded: %s device(s)",
