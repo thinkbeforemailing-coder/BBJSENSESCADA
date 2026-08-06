@@ -10,6 +10,7 @@ from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 
 from offline_buffer import (
     count_pending_messages,
+    delete_sent_messages,
     enqueue_telemetry,
     get_pending_messages,
     initialize_database,
@@ -45,6 +46,8 @@ DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
 BUFFER_RESEND_INTERVAL_SECONDS = 10
 BUFFER_RESEND_BATCH_SIZE = 100
+BUFFER_CLEANUP_INTERVAL_SECONDS = 3600
+BUFFER_CLEANUP_KEEP_LATEST = 1000
 DEVICE_STATUS_WRITE_INTERVAL_SECONDS = 5
 COMMANDS_POLL_INTERVAL_SECONDS = 60
 
@@ -744,11 +747,49 @@ def execute_command(
     ack_command(command_id, "success")
 
 
+def run_buffer_cleanup_loop() -> None:
+    """
+    Periodically delete old sent telemetry records.
+
+    Runs on its own thread, deliberately decoupled from the main
+    polling loop: a bulk DELETE across a large "sent" backlog can take
+    much longer than expected on Windows (Defender real-time scanning
+    interacting with SQLite's synchronous=FULL fsync behavior is a
+    known cause), and the main loop must never be blocked by
+    housekeeping -- devices still need to be polled on schedule while
+    this runs. Sleeps first so cleanup never competes with startup.
+    """
+    while True:
+        time.sleep(BUFFER_CLEANUP_INTERVAL_SECONDS)
+
+        try:
+            deleted_count = delete_sent_messages(
+                keep_latest=BUFFER_CLEANUP_KEEP_LATEST,
+            )
+
+            if deleted_count:
+                logger.info(
+                    "Offline buffer cleanup removed %s old "
+                    "sent record(s)",
+                    deleted_count,
+                )
+        except Exception as error:
+            logger.exception(
+                "Offline buffer cleanup error: %s",
+                error,
+            )
+
+
 def main() -> None:
     initialize_database()
 
     logger.info("BBJ Sense Dynamic Gateway starting")
     logger.info("Cloud API: %s", API_BASE_URL)
+
+    threading.Thread(
+        target=run_buffer_cleanup_loop,
+        daemon=True,
+    ).start()
 
     configuration: dict = read_config_cache() or {}
 
