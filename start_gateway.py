@@ -19,6 +19,8 @@ PYTHON = Path(sys.executable)
 POLLING_SCRIPT = BASE_DIR / "dynamic_modbus_poller.py"
 HEALTH_SCRIPT = BASE_DIR / "gateway_health_reporter.py"
 
+WATCHDOG_INTERVAL_SECONDS = 5
+
 
 # ==============================
 # LOGGER INITIALIZATION
@@ -47,22 +49,37 @@ logger.info(
 )
 
 
-processes = []
+components = [
+    {
+        "name": "Telemetry Poller",
+        "script": POLLING_SCRIPT,
+        "process": None,
+        "restart_count": 0,
+    },
+    {
+        "name": "Health Reporter",
+        "script": HEALTH_SCRIPT,
+        "process": None,
+        "restart_count": 0,
+    },
+]
 
 running = True
 
 
 # ==============================
-# START CHILD PROCESS
+# START / RESTART CHILD PROCESS
 # ==============================
 
-def start_process(name, script):
+def start_process(component):
+
+    script = component["script"]
 
     if not script.exists():
 
         logger.error(
             "%s script not found: %s",
-            name,
+            component["name"],
             script
         )
 
@@ -71,7 +88,7 @@ def start_process(name, script):
 
     logger.info(
         "Starting %s",
-        name
+        component["name"]
     )
 
     logger.info(
@@ -102,14 +119,46 @@ def start_process(name, script):
     )
 
 
-    processes.append(process)
+    component["process"] = process
 
 
     logger.info(
         "%s started PID=%s",
-        name,
+        component["name"],
         process.pid
     )
+
+
+# ==============================
+# WATCHDOG
+# ==============================
+
+def check_components():
+
+    for component in components:
+
+        process = component["process"]
+
+        if process is None:
+            continue
+
+        exit_code = process.poll()
+
+        if exit_code is None:
+            continue
+
+
+        component["restart_count"] += 1
+
+        logger.error(
+            "%s exited unexpectedly | exit_code=%s | "
+            "restarting | restart_count=%s",
+            component["name"],
+            exit_code,
+            component["restart_count"],
+        )
+
+        start_process(component)
 
 
 # ==============================
@@ -127,7 +176,12 @@ def stop_handler(signum, frame):
     running = False
 
 
-    for process in processes:
+    for component in components:
+
+        process = component["process"]
+
+        if process is None:
+            continue
 
         try:
 
@@ -187,16 +241,8 @@ def main():
     )
 
 
-    start_process(
-        "Telemetry Poller",
-        POLLING_SCRIPT
-    )
-
-
-    start_process(
-        "Health Reporter",
-        HEALTH_SCRIPT
-    )
+    for component in components:
+        start_process(component)
 
 
     logger.info(
@@ -206,7 +252,10 @@ def main():
 
     while running:
 
-        time.sleep(5)
+        time.sleep(WATCHDOG_INTERVAL_SECONDS)
+
+        if running:
+            check_components()
 
 
     logger.info(
