@@ -12,3 +12,4 @@ device_status.json
 device_status.json.tmp
 config_cache.json
 config_cache.json.tmp
+.pytest_cache/
