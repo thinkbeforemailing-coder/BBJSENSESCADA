@@ -1,5 +1,4 @@
-import logging
-import os
+import contextlib
 from logging_config import setup_logger
 import struct
 import time
@@ -7,7 +6,7 @@ import threading
 from typing import Any
 
 import requests
-from pymodbus.client import ModbusSerialClient
+from pymodbus.client import ModbusSerialClient, ModbusTcpClient
 
 from offline_buffer import (
     count_pending_messages,
@@ -18,11 +17,15 @@ from offline_buffer import (
     mark_message_sent,
 )
 from device_status import write_device_status
+from settings import (
+    API_BASE_URL,
+    CONFIG_REFRESH_SECONDS,
+    CONFIG_URL,
+    GATEWAY_KEY,
+    HTTP_TIMEOUT_SECONDS,
+    TELEMETRY_URL,
+)
 
-
-API_BASE_URL = "http://34.131.199.29:8000"
-
-GATEWAY_KEY = os.environ.get("BBJ_GATEWAY_KEY")
 
 if not GATEWAY_KEY:
     raise RuntimeError(
@@ -30,17 +33,15 @@ if not GATEWAY_KEY:
         "Set it before starting the gateway."
     )
 
-CONFIG_URL = f"{API_BASE_URL}/gateway/config"
-TELEMETRY_URL = f"{API_BASE_URL}/gateway/telemetry/"
-
-CONFIG_REFRESH_SECONDS = 60
-HTTP_TIMEOUT_SECONDS = 10
 MODBUS_TIMEOUT_SECONDS = 2
 DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
 BUFFER_RESEND_INTERVAL_SECONDS = 10
 BUFFER_RESEND_BATCH_SIZE = 100
 DEVICE_STATUS_WRITE_INTERVAL_SECONDS = 5
+
+RTU_COMMUNICATION_TYPES = {"modbus rtu", "serial", "rtu", ""}
+TCP_COMMUNICATION_TYPES = {"modbus tcp", "tcp"}
 
 DEVICE_STATUS: dict[int, str] = {}
 
@@ -310,8 +311,36 @@ def create_serial_client(connection: dict) -> ModbusSerialClient:
     )
 
 
+def create_tcp_client(connection: dict) -> ModbusTcpClient:
+    ip_address = connection.get("ip_address")
+
+    if not ip_address:
+        raise ValueError("IP address is not configured")
+
+    return ModbusTcpClient(
+        host=str(ip_address),
+        port=int(connection.get("tcp_port") or 502),
+        timeout=MODBUS_TIMEOUT_SECONDS,
+    )
+
+
+def create_modbus_client(
+    communication_type: str,
+    connection: dict,
+) -> ModbusSerialClient | ModbusTcpClient:
+    if communication_type in RTU_COMMUNICATION_TYPES:
+        return create_serial_client(connection)
+
+    if communication_type in TCP_COMMUNICATION_TYPES:
+        return create_tcp_client(connection)
+
+    raise ValueError(
+        f"Unsupported communication type: {communication_type}"
+    )
+
+
 def read_modbus_registers(
-    client: ModbusSerialClient,
+    client: ModbusSerialClient | ModbusTcpClient,
     tag: dict,
     slave_id: int,
 ) -> list[int]:
@@ -343,7 +372,7 @@ def read_modbus_registers(
 
 
 def process_tag(
-    client: ModbusSerialClient,
+    client: ModbusSerialClient | ModbusTcpClient,
     device: dict,
     tag: dict,
 ) -> None:
@@ -440,12 +469,10 @@ def run_device(
             .replace("-", " ")
         )
 
-        if communication_type not in {
-            "modbus rtu",
-            "serial",
-            "rtu",
-            "",
-        }:
+        if (
+            communication_type not in RTU_COMMUNICATION_TYPES
+            and communication_type not in TCP_COMMUNICATION_TYPES
+        ):
             logger.warning(
                 "Skipping unsupported communication type for device %s: %s",
                 device.get("device_name"),
@@ -454,15 +481,25 @@ def run_device(
             DEVICE_STATUS[device_id] = "failed"
             return
 
+        is_serial = communication_type in RTU_COMMUNICATION_TYPES
 
-        with MODBUS_SERIAL_LOCK:
+        bus_lock = (
+            MODBUS_SERIAL_LOCK
+            if is_serial
+            else contextlib.nullcontext()
+        )
 
-            client = create_serial_client(connection)
+        with bus_lock:
+
+            client = create_modbus_client(
+                communication_type=communication_type,
+                connection=connection,
+            )
 
             if not client.connect():
                 raise ConnectionError(
-                    "Unable to connect to serial port "
-                    f"{connection.get('serial_port')}"
+                    "Unable to connect to device "
+                    f"{device.get('device_name')}"
                 )
 
             DEVICE_STATUS[device_id] = "connected"

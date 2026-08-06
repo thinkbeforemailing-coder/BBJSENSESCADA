@@ -7,12 +7,9 @@ import requests
 
 from device_status import read_device_counts
 from logging_config import setup_logger
+from settings import GATEWAY_ID, GATEWAY_NAME, HEALTH_URL
 
 
-CLOUD_API_URL = "http://34.131.199.29:8000/gateway/health"
-
-GATEWAY_ID = "BBJ-GW-001"
-GATEWAY_NAME = "BBJ Windows Gateway 01"
 APP_VERSION = "1.0.0"
 
 REPORT_INTERVAL_SECONDS = 60
@@ -76,7 +73,7 @@ def send_health_report() -> None:
     payload = build_health_payload()
 
     response = requests.post(
-        CLOUD_API_URL,
+        HEALTH_URL,
         json=payload,
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
@@ -96,7 +93,7 @@ def send_health_report() -> None:
 
 def main() -> None:
     logger.info("BBJ Sense Gateway Health Reporter starting")
-    logger.info("Cloud API: %s", CLOUD_API_URL)
+    logger.info("Cloud API: %s", HEALTH_URL)
     logger.info("Gateway ID: %s", GATEWAY_ID)
     logger.info(
         "Interval: %s seconds",
