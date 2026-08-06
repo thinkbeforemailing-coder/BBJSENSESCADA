@@ -1,16 +1,19 @@
 import json
+import logging
 from pathlib import Path
-
-from logging_config import setup_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent
 DEVICE_STATUS_PATH = BASE_DIR / "device_status.json"
 
-logger = setup_logger(
-    logger_name="bbj-sense-device-status",
-    log_filename="gateway_health.log",
-)
+# Deliberately NOT setup_logger() -- a second independent
+# RotatingFileHandler on the same file caused a Windows file-locking
+# hang when two handlers tried to roll over the same log file at once.
+# This is a child of the "gateway-health" logger (dotted name), the
+# only process where this module's logger.warning() call actually
+# executes, so it propagates into that logger's single already
+# -configured handler instead of owning its own.
+logger = logging.getLogger("gateway-health.device_status")
 
 
 def write_device_status(status_by_device: dict[int, str]) -> None:

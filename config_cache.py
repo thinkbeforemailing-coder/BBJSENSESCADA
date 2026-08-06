@@ -1,16 +1,13 @@
 import json
+import logging
 from pathlib import Path
-
-from logging_config import setup_logger
 
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_CACHE_PATH = BASE_DIR / "config_cache.json"
 
-logger = setup_logger(
-    logger_name="bbj-sense-config-cache",
-    log_filename="telemetry_poller.log",
-)
+# Deliberately NOT setup_logger() -- see offline_buffer.py for why.
+logger = logging.getLogger("telemetry-poller.config_cache")
 
 
 def write_config_cache(configuration: dict) -> None:

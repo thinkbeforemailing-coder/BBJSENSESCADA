@@ -1,8 +1,8 @@
+import logging
 from datetime import datetime, timezone
 
 import requests
 
-from logging_config import setup_logger
 from settings import API_BASE_URL, GATEWAY_KEY, HTTP_TIMEOUT_SECONDS
 
 
@@ -11,10 +11,8 @@ ACK_URL_TEMPLATE = f"{API_BASE_URL}/gateway/commands/{{command_id}}/ack"
 
 VALID_COMMAND_TYPES = {"write_register", "write_coil"}
 
-logger = setup_logger(
-    logger_name="bbj-sense-gateway-commands",
-    log_filename="telemetry_poller.log",
-)
+# Deliberately NOT setup_logger() -- see offline_buffer.py for why.
+logger = logging.getLogger("telemetry-poller.gateway_commands")
 
 _endpoint_unsupported_logged = False
 
