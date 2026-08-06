@@ -1,0 +1,49 @@
+from pymodbus.client import ModbusSerialClient
+import struct
+
+
+client = ModbusSerialClient(
+    port="COM6",
+    baudrate=4800,
+    parity="O",
+    stopbits=2,
+    bytesize=8,
+    timeout=2
+)
+
+
+client.connect()
+
+
+address = 144
+
+
+result = client.read_holding_registers(
+    address=address,
+    count=2,
+    slave=2
+)
+
+
+print(result)
+
+
+if not result.isError():
+
+    print("RAW:", result.registers)
+
+    data = struct.pack(
+        ">HH",
+        result.registers[1],
+        result.registers[0]
+    )
+
+    value = struct.unpack(
+        ">f",
+        data
+    )[0]
+
+    print("VALUE:", value)
+
+
+client.close()

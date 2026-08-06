@@ -1,0 +1,7 @@
+@echo off
+
+cd /d C:\bbj-sense-gateway
+
+call C:\bbj-sense-gateway\venv\Scripts\activate.bat
+
+C:\bbj-sense-gateway\venv\Scripts\python.exe -u C:\bbj-sense-gateway\start_gateway.py

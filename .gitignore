@@ -1,0 +1,10 @@
+venv/
+venv_backup/
+venv_old_store/
+__pycache__/
+*.pyc
+logs/
+*.log
+gateway_buffer.db
+gateway_buffer.db-shm
+gateway_buffer.db-wal
