@@ -20,7 +20,17 @@ POLLING_SCRIPT = BASE_DIR / "dynamic_modbus_poller.py"
 HEALTH_SCRIPT = BASE_DIR / "gateway_health_reporter.py"
 
 WATCHDOG_INTERVAL_SECONDS = 5
-CHILD_STOP_TIMEOUT_SECONDS = 5
+
+# nssm's own stop escalation (AppStopMethodConsole/Window/Threads, checked
+# via `nssm get "BBJ Sense Gateway" AppStopMethod...`) is 1500ms per method
+# with none skipped -- roughly 4.5s total before it hard-kills this very
+# process regardless of what we're doing. If we wait longer than that per
+# child, nssm can terminate *us* mid-wait in the genuinely-stuck case,
+# silencing the critical alert below before it ever gets logged. Kept
+# short and safely under that budget even with two children waited
+# sequentially; a healthy process exits in milliseconds, so this only
+# costs time when something is actually wrong.
+CHILD_STOP_TIMEOUT_SECONDS = 1
 
 
 # ==============================
