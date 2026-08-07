@@ -15,9 +15,11 @@
 | 2 | No way to revoke/rotate an existing gateway credential | Medium | Fixed 2026-08-07 |
 | 3 | Default `admin` / `admin123` credentials, role `super_admin` | Critical | Fixed 2026-08-07 |
 | 4 | No password-change capability for existing users | High | Fixed 2026-08-07 |
-| 5 | API served over plain HTTP, no TLS | Medium | Open |
+| 5 | API served over plain HTTP, no TLS | Medium | Fixed 2026-08-07 |
 
-**2026-08-07 update:** findings #1–#4 fixed directly on the backend (`/home/jsctennis80/bbj-sense/backend`, GCP VM `bbj-sense-app`): `PATCH /users/{id}/password` (closes #3/#4), `DELETE /gateway/auth/{gateway_id}` (closes #2, used to revoke the leaked `BBJ-GW-001` key), and `Depends(verify_gateway_access)` added to all `/gateway/config` and `/gateway/health` endpoints (closes #1). The #1 fix required updating this gateway repo first (commit `4d9f22d`, sends `X-Gateway-Key` on config/health calls) and deploying that ahead of the backend change, to avoid breaking live polling. #5 (TLS) remains open — larger infra change, not done in this pass.
+**2026-08-07 update:** all 5 findings fixed. #1–#4 fixed directly on the backend (`/home/jsctennis80/bbj-sense/backend`, GCP VM `bbj-sense-app`): `PATCH /users/{id}/password` (closes #3/#4), `DELETE /gateway/auth/{gateway_id}` (closes #2, used to revoke the leaked `BBJ-GW-001` key), and `Depends(verify_gateway_access)` added to all `/gateway/config` and `/gateway/health` endpoints (closes #1). The #1 fix required updating this gateway repo first (commit `4d9f22d`, sends `X-Gateway-Key` on config/health calls) and deploying that ahead of the backend change, to avoid breaking live polling.
+
+**#5 (TLS) closed same day:** `bbjsense.com` / `www.bbjsense.com` DNS pointed at the server, Caddy installed as a reverse proxy in front of uvicorn with automatic Let's Encrypt certs (`/etc/caddy/Caddyfile`, proxies to `localhost:8000`). Gateway repo updated (commit `7067341`) to use `https://www.bbjsense.com` as the default `BBJ_API_BASE_URL`. Direct plaintext access on port 8000 was then closed off entirely at the GCP firewall (three redundant `0.0.0.0/0 tcp:8000` rules — `allow-bbj-api`, `allow-bbj-fastapi`, `allow-fastapi-8000` — deleted), so the only way to reach the API now is through Caddy/TLS.
 
 ---
 
