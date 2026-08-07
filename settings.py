@@ -3,7 +3,7 @@ import os
 
 API_BASE_URL = os.environ.get(
     "BBJ_API_BASE_URL",
-    "http://34.131.199.29:8000",
+    "https://www.bbjsense.com",
 )
 
 GATEWAY_ID = os.environ.get("BBJ_GATEWAY_ID", "BBJ-GW-001-v2")
