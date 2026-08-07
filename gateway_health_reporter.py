@@ -7,7 +7,7 @@ import requests
 
 from device_status import read_device_counts
 from logging_config import setup_logger
-from settings import GATEWAY_ID, GATEWAY_NAME, HEALTH_URL
+from settings import GATEWAY_ID, GATEWAY_KEY, GATEWAY_NAME, HEALTH_URL
 
 
 APP_VERSION = "1.0.0"
@@ -75,6 +75,7 @@ def send_health_report() -> None:
     response = requests.post(
         HEALTH_URL,
         json=payload,
+        headers={"X-Gateway-Key": GATEWAY_KEY},
         timeout=REQUEST_TIMEOUT_SECONDS,
     )
 

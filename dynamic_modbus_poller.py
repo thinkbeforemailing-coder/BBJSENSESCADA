@@ -173,6 +173,7 @@ def decode_registers(
 def download_configuration() -> dict:
     response = requests.get(
         CONFIG_URL,
+        headers={"X-Gateway-Key": GATEWAY_KEY},
         timeout=HTTP_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
