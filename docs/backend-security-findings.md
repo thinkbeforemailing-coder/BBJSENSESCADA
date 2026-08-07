@@ -11,11 +11,13 @@
 
 | # | Finding | Severity | Status |
 |---|---------|----------|--------|
-| 1 | `/gateway/config` and `/gateway/health` require no authentication | High | Open |
-| 2 | No way to revoke/rotate an existing gateway credential | Medium | Open |
-| 3 | Default `admin` / `admin123` credentials, role `super_admin` | Critical | Open |
-| 4 | No password-change capability for existing users | High | Open |
+| 1 | `/gateway/config` and `/gateway/health` require no authentication | High | Fixed 2026-08-07 |
+| 2 | No way to revoke/rotate an existing gateway credential | Medium | Fixed 2026-08-07 |
+| 3 | Default `admin` / `admin123` credentials, role `super_admin` | Critical | Fixed 2026-08-07 |
+| 4 | No password-change capability for existing users | High | Fixed 2026-08-07 |
 | 5 | API served over plain HTTP, no TLS | Medium | Open |
+
+**2026-08-07 update:** findings #1–#4 fixed directly on the backend (`/home/jsctennis80/bbj-sense/backend`, GCP VM `bbj-sense-app`): `PATCH /users/{id}/password` (closes #3/#4), `DELETE /gateway/auth/{gateway_id}` (closes #2, used to revoke the leaked `BBJ-GW-001` key), and `Depends(verify_gateway_access)` added to all `/gateway/config` and `/gateway/health` endpoints (closes #1). The #1 fix required updating this gateway repo first (commit `4d9f22d`, sends `X-Gateway-Key` on config/health calls) and deploying that ahead of the backend change, to avoid breaking live polling. #5 (TLS) remains open — larger infra change, not done in this pass.
 
 ---
 
