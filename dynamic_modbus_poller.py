@@ -42,6 +42,7 @@ if not GATEWAY_KEY:
     )
 
 MODBUS_TIMEOUT_SECONDS = 2
+CLIENT_CLOSE_TIMEOUT_SECONDS = 3
 DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
 BUFFER_RESEND_INTERVAL_SECONDS = 10
@@ -350,6 +351,33 @@ def create_modbus_client(
     )
 
 
+def close_client_with_timeout(
+    client: ModbusSerialClient | ModbusTcpClient,
+) -> None:
+    """
+    Close a Modbus client without letting a stuck driver freeze the poller.
+
+    client.close() is a blocking OS-level call with no timeout of its own.
+    If the underlying serial handle is wedged (see the 2026-08-07 COM-port
+    zombie incident), close() can block indefinitely and, since polling is
+    single-threaded, take the whole gateway down with it. Running it on a
+    daemon thread and waiting only up to CLIENT_CLOSE_TIMEOUT_SECONDS lets
+    the poll loop move on regardless; the abandoned thread finishes (or
+    doesn't) on its own.
+    """
+    close_thread = threading.Thread(target=client.close, daemon=True)
+    close_thread.start()
+    close_thread.join(timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
+
+    if close_thread.is_alive():
+        logger.warning(
+            "client.close() did not return within %ss -- abandoning it "
+            "so the poll loop is not blocked; the underlying handle may "
+            "still be held by the OS",
+            CLIENT_CLOSE_TIMEOUT_SECONDS,
+        )
+
+
 def read_modbus_registers(
     client: ModbusSerialClient | ModbusTcpClient,
     tag: dict,
@@ -572,7 +600,7 @@ def run_device(
 
             finally:
 
-                client.close()
+                close_client_with_timeout(client)
 
 
     except Exception:
@@ -733,7 +761,7 @@ def execute_command(
 
         finally:
             if client is not None:
-                client.close()
+                close_client_with_timeout(client)
 
     logger.info(
         "Command=%s | Device=%s | Tag=%s | Executed successfully | "

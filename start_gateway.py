@@ -20,6 +20,7 @@ POLLING_SCRIPT = BASE_DIR / "dynamic_modbus_poller.py"
 HEALTH_SCRIPT = BASE_DIR / "gateway_health_reporter.py"
 
 WATCHDOG_INTERVAL_SECONDS = 5
+CHILD_STOP_TIMEOUT_SECONDS = 5
 
 
 # ==============================
@@ -199,6 +200,61 @@ def stop_handler(signum, frame):
                 "Stop error"
             )
 
+
+    # Wait for each child to actually exit before this process (and
+    # therefore the service restart) is considered complete. Without this,
+    # a child stuck in an uncancelable wait (e.g. a hung serial driver, see
+    # the 2026-08-07 COM-port zombie incident) survives as an orphan still
+    # holding hardware resources, and the replacement instance started by
+    # the next restart silently fails every operation against them.
+    for component in components:
+
+        process = component["process"]
+
+        if process is None:
+            continue
+
+        try:
+
+            process.wait(timeout=CHILD_STOP_TIMEOUT_SECONDS)
+
+            logger.info(
+                "PID=%s (%s) exited cleanly",
+                process.pid,
+                component["name"],
+            )
+
+        except subprocess.TimeoutExpired:
+
+            # On Windows, Popen.kill() is just an alias for terminate()
+            # (both call TerminateProcess), so retrying with kill() here
+            # would not do anything different -- confirmed during the
+            # 2026-08-07 incident, where Stop-Process -Force, taskkill /F,
+            # and Win32_Process.Terminate() all failed identically against
+            # a process blocked in a driver-level wait. There is nothing
+            # more this process can do; surface it loudly instead of
+            # silently letting a replacement start and collide with it.
+            logger.critical(
+                "PID=%s (%s) did NOT exit within %ss of terminate() -- "
+                "likely stuck in an uncancelable driver-level wait. It may "
+                "still hold a hardware handle (e.g. a serial port) that "
+                "will block the next instance from working even though "
+                "the service restart appears to succeed. Manual "
+                "intervention required (see "
+                "bbj-com-port-zombie-incident memory for the fix that "
+                "worked last time: disable/re-enable the device in "
+                "Device Manager).",
+                process.pid,
+                component["name"],
+                CHILD_STOP_TIMEOUT_SECONDS,
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Error waiting for PID=%s to stop",
+                process.pid,
+            )
 
 
 # ==============================
