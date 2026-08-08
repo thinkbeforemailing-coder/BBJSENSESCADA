@@ -1,6 +1,6 @@
 # Proposal: Anomaly-Based Alarms
 
-**Status:** Scoped, not built. For the backend team, not this gateway repo — see below for why.
+**Status:** Built 2026-08-08, running in shadow mode on the live backend (commit `3a06fe2`). No alarm rule uses it yet, and shadow mode means it won't create real alarms/notifications even once one does, until `ANOMALY_SHADOW_MODE` is flipped off in `alarm_engine.py`. See "Built (2026-08-08)" at the bottom for what's live vs. what's still a manual step.
 
 ## Why this doesn't belong in the gateway
 
@@ -101,3 +101,17 @@ Don't wire this straight into live `AlarmEvent`/notification creation on day one
 ### Effort estimate
 
 Roughly a half-day to a day of implementation (one migration, one small scheduler service, one new branch in an existing function, one small frontend form tweak), plus the shadow-mode observation period before it's trusted to raise real alarms. Small in code volume; the actual cost is calendar time waiting to see the baseline behave sanely on real data.
+
+## Built (2026-08-08)
+
+Implemented exactly as scoped above — backend commit `3a06fe2`, deployed and verified live (ruff/pytest clean, migration applied, monitored soak showed clean startup with `Anomaly baseline scheduler started` and no errors).
+
+**What's live:**
+- `tag_baselines` table exists, migration `f20859f1e9cd` applied.
+- `anomaly_baseline_scheduler.py` runs as a fourth background thread, recomputing every 30 minutes for any `(device_id, tag_id)` with an enabled `anomaly`-type rule. Currently a no-op — no such rule exists yet.
+- `alarm_engine.py`'s `check_device_alarms()` has the `anomaly` branch with both guards (cold-start coverage check, near-zero-stddev check).
+- `alarm-rules.html` has "Anomaly" as a selectable type, with the threshold field relabeling to "Std Dev Multiplier".
+
+**What's still a manual step, by design:**
+- **No alarm rule uses `anomaly` yet.** Someone needs to actually create one (pick a device/tag, set the type to Anomaly, set the "Std Dev Multiplier" — 3.0 is a reasonable starting point) before any of this does anything.
+- **Even once a rule exists, `ANOMALY_SHADOW_MODE = True` in `alarm_engine.py` means it only logs `SHADOW ANOMALY (not raised, shadow mode): ...` lines — no real `AlarmEvent` gets created, no notification goes out.** This is intentional: watch those shadow log lines for a trial period (the design's own recommendation was roughly the length of the baseline window, i.e. about a week) before flipping the flag to `False` and trusting it with real alerts. Also note the cold-start guard means a brand-new anomaly rule won't evaluate at all until its baseline has accumulated close to a full 7-day window of history — so the earliest a freshly created rule can even start logging shadow output is about 6 days after creation, not immediately.
