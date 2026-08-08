@@ -1,6 +1,6 @@
 # Proposal: Anomaly-Based Alarms
 
-**Status:** Proposal only — not implemented anywhere. For the backend team, not this gateway repo.
+**Status:** Scoped, not built. For the backend team, not this gateway repo — see below for why.
 
 ## Why this doesn't belong in the gateway
 
@@ -26,3 +26,78 @@ For electrical telemetry (frequency, voltage, current, power factor), a full ML 
 ## What this needs from the gateway side (already true today)
 
 Nothing new. The gateway already reliably delivers timestamped, quality-flagged telemetry (`good`/`out_of_range`) for every tag — that's the only input this needs. No gateway changes required to support this.
+
+---
+
+## Scoped design (2026-08-08)
+
+Reviewed the live backend to ground this in actual data, not guesswork: `telemetry_values` has 118,859 rows across 9 distinct (device, tag) pairs, ~14,400 rows/tag over the last 5 days (a reading roughly every 30s), table size is 18MB, and every row so far is `quality='good'`. Only 2 `alarm_rules` exist today (Low Frequency, High Voltage). At this scale, computing a 7-day mean/stddev on the fly is trivially cheap — but the design below decouples baseline computation from alarm evaluation anyway, since that's the right shape regardless of current scale and avoids a rewrite later.
+
+### Schema: one new table, no changes to existing tables
+
+```sql
+CREATE TABLE tag_baselines (
+    id SERIAL PRIMARY KEY,
+    device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES device_tags(id) ON DELETE CASCADE,
+    mean_value FLOAT NOT NULL,
+    stddev_value FLOAT NOT NULL,
+    sample_count INTEGER NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    window_end TIMESTAMPTZ NOT NULL,
+    computed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (device_id, tag_id)
+);
+```
+
+`alarm_rules.alarm_type` gets a third value, `"anomaly"`, alongside the existing `"high"`/`"low"` strings (it's a plain `String(30)` with no CHECK constraint, so this needs no migration). The existing `threshold_value` column is reused as the **standard-deviation multiplier** for anomaly rules (e.g. `3.0` = flag anything more than 3σ from the rolling mean) — same column, different meaning depending on `alarm_type`, consistent with how the table already overloads that field.
+
+### New service: `anomaly_baseline_scheduler.py`
+
+A fourth background thread alongside the existing `gateway_scheduler`/`alarm_scheduler`/`notification_scheduler` (same `threading.Thread(daemon=True)` pattern in `main.py`). Runs every 30–60 minutes, not every 5 seconds like the alarm loop — recomputing a rolling baseline doesn't need to happen at alarm-check frequency, and separating the two means a slow aggregate query never has a chance to block real-time alarm evaluation.
+
+For each `(device_id, tag_id)` that has at least one enabled `anomaly`-type rule (skip computing baselines nobody asked for):
+
+```sql
+SELECT avg(value), stddev_samp(value), count(*)
+FROM telemetry_values
+WHERE device_id = :device_id AND tag_id = :tag_id
+  AND quality = 'good'
+  AND timestamp > now() - interval '7 days'
+```
+
+Upsert the result into `tag_baselines`. Postgres's native `stddev_samp()` does the math — no Python-side statistics needed.
+
+### Evaluation: one new branch in `alarm_engine.py`'s `check_device_alarms()`
+
+Alongside the existing `if rule.alarm_type == "high": ... elif == "low": ...`:
+
+```python
+elif rule.alarm_type == "anomaly":
+    baseline = get_baseline(db, rule.device_id, rule.tag_id)
+
+    if baseline is None or baseline.sample_count < MIN_SAMPLES_FOR_BASELINE:
+        continue  # cold start: not enough history yet, skip silently
+
+    if baseline.stddev_value < MIN_STDDEV_EPSILON:
+        continue  # flat signal: any deviation would trigger; not meaningful yet
+
+    z = abs(value - baseline.mean_value) / baseline.stddev_value
+    alarm_triggered = z >= rule.threshold_value
+```
+
+Two guards worth calling out because they're easy to skip and both cause false positives if skipped: a **cold-start minimum sample count** (a tag with 20 minutes of history has no meaningful baseline — recommend requiring a full window's worth, e.g. 7 days, before evaluating at all) and a **near-zero-stddev guard** (a genuinely constant signal has σ≈0, so any tiny reading noise would compute as "infinite" standard deviations away and fire constantly).
+
+V1 close/reset logic: simplest option is closing the alarm as soon as `z` drops back under the threshold, same as today's `high`/`low` handling without a separate `reset_value`. This risks some flapping right at the boundary — acceptable to start, and `reset_value` is already there to reuse for hysteresis (e.g. a lower z-threshold to reset) if flapping turns out to be a real problem in practice.
+
+### What doesn't need to change
+
+No new API endpoints — `alarm_rules.py`'s existing CRUD already handles arbitrary `alarm_type` strings. The only UI touch is the alarm-rule creation form: add `"anomaly"` as a selectable type, and relabel the threshold field to "Std Dev Multiplier" when that type is selected.
+
+### Rollout recommendation: shadow mode first
+
+Don't wire this straight into live `AlarmEvent`/notification creation on day one. Run the evaluation branch for a trial period (a week or two, matching the baseline window) logging what *would* have fired without actually creating alarm events or sending notifications, then review those against what the site operator would consider a real anomaly. This is cheap insurance against an early bug in the baseline math (e.g. mixing up mean/stddev order, or the cold-start guard being too permissive) turning into real spurious alerts to whoever's on the notification list.
+
+### Effort estimate
+
+Roughly a half-day to a day of implementation (one migration, one small scheduler service, one new branch in an existing function, one small frontend form tweak), plus the shadow-mode observation period before it's trusted to raise real alarms. Small in code volume; the actual cost is calendar time waiting to see the baseline behave sanely on real data.
