@@ -20,3 +20,9 @@ Unlike `anomaly`, none of these run in shadow mode — they're simple, predictab
 ## Verified live
 
 ruff/pytest clean, CI green, service restarted cleanly with all three schedulers starting, existing alarms (Low Frequency, High Voltage, Active Power Anomaly) still evaluating correctly post-deploy, no errors in a monitored soak. The five new branches haven't been exercised yet since no rule uses them — same "inert until configured" pattern as everything else built this session.
+
+## `communication_loss` end-to-end test (2026-08-08)
+
+Created rule id 7 ("Frequency Communication Loss", tag `frequency` on `Main Incomer Meter`) with a deliberately tiny threshold to force an immediate fire without needing to actually break anything. Confirmed the full real pipeline: fired on the first eval cycle → created a real, correctly tenant-stamped `AlarmEvent` → dispatched real notifications (email genuinely delivered to `bbjsense@gmail.com`, WhatsApp honestly reported "not configured") → no duplicate notifications on subsequent cycles (dedup logic held) → threshold then set to a sane production value (60 seconds) → confirmed via direct DB query that the alarm auto-closed once staleness returned under threshold.
+
+**Kept live as a real rule** — rule id 7 now serves as an actual per-tag staleness watchdog on the frequency tag, not just a test artifact.
