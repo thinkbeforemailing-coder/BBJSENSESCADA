@@ -172,8 +172,12 @@ def enqueue_telemetry(
 
             connection.commit()
 
-    logger.warning(
-        "Telemetry buffered locally | "
+    # Every reading now goes through this queue as the normal path
+    # (see dynamic_modbus_poller.save_telemetry), not just on upload
+    # failure -- debug, not warning, or this would log at warning level
+    # on every single poll.
+    logger.debug(
+        "Telemetry queued for batch upload | "
         "message_id=%s | device_id=%s | tag_id=%s",
         message_id,
         device_id,

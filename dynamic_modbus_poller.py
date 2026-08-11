@@ -31,7 +31,7 @@ from settings import (
     CONFIG_URL,
     GATEWAY_KEY,
     HTTP_TIMEOUT_SECONDS,
-    TELEMETRY_URL,
+    TELEMETRY_BATCH_URL,
 )
 
 
@@ -45,8 +45,8 @@ MODBUS_TIMEOUT_SECONDS = 2
 CLIENT_CLOSE_TIMEOUT_SECONDS = 3
 DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
-BUFFER_RESEND_INTERVAL_SECONDS = 10
-BUFFER_RESEND_BATCH_SIZE = 100
+BATCH_FLUSH_INTERVAL_SECONDS = 5
+BATCH_FLUSH_SIZE = 500
 BUFFER_CLEANUP_INTERVAL_SECONDS = 3600
 BUFFER_CLEANUP_KEEP_LATEST = 1000
 DEVICE_STATUS_WRITE_INTERVAL_SECONDS = 5
@@ -186,22 +186,19 @@ def download_configuration() -> dict:
     return configuration
 
 
-def post_telemetry_payload(payload: dict) -> None:
+def post_telemetry_batch(items: list[dict]) -> dict:
     response = requests.post(
-    TELEMETRY_URL,
-    json=payload,
-    headers={
-        "X-Gateway-Key": GATEWAY_KEY
-    },
-    timeout=HTTP_TIMEOUT_SECONDS,
-)
+        TELEMETRY_BATCH_URL,
+        json={"items": items},
+        headers={
+            "X-Gateway-Key": GATEWAY_KEY
+        },
+        timeout=HTTP_TIMEOUT_SECONDS,
+    )
     response.raise_for_status()
 
-    logger.info(
-    "Telemetry uploaded successfully | status=%s | payload=%s",
-    response.status_code,
-    payload
-)
+    return response.json()
+
 
 def save_telemetry(
     device_id: int,
@@ -209,45 +206,37 @@ def save_telemetry(
     value: float,
     quality: str = "good",
 ) -> None:
-    payload = {
-        "device_id": int(device_id),
-        "tag_id": int(tag_id),
-        "value": float(value),
-        "quality": str(quality),
-    }
+    """
+    Queue one reading locally; flush_pending_batch() uploads it.
 
-    try:
-        post_telemetry_payload(payload)
-    except requests.RequestException as error:
-        message_id = enqueue_telemetry(
-            device_id=device_id,
-            tag_id=tag_id,
-            value=value,
-            quality=quality,
-        )
-
-        logger.warning(
-            "Cloud upload failed; telemetry buffered | "
-            "message_id=%s | device_id=%s | tag_id=%s | error=%s",
-            message_id,
-            device_id,
-            tag_id,
-            error,
-        )
+    Deliberately does not attempt a synchronous cloud POST here -- that
+    used to block the single-threaded poll loop on network I/O for up
+    to HTTP_TIMEOUT_SECONDS per tag whenever the connection was slow or
+    down, which could cascade into every other device/tag falling
+    behind its own poll schedule. Enqueuing is a local SQLite write;
+    the periodic batch flush does the actual upload, off the poll hot
+    path, batching everything accumulated since the last flush into
+    one HTTP request instead of one request per reading.
+    """
+    enqueue_telemetry(
+        device_id=device_id,
+        tag_id=tag_id,
+        value=value,
+        quality=quality,
+    )
 
 
-def resend_pending_telemetry() -> None:
+def flush_pending_batch() -> None:
+    """Upload everything currently queued locally in one HTTP request."""
     pending_messages = get_pending_messages(
-        limit=BUFFER_RESEND_BATCH_SIZE,
+        limit=BATCH_FLUSH_SIZE,
     )
 
     if not pending_messages:
         return
 
-    logger.info(
-        "Attempting to resend %s buffered message(s)",
-        len(pending_messages),
-    )
+    items = []
+    valid_messages = []
 
     for message in pending_messages:
         message_id = str(message["message_id"])
@@ -265,7 +254,7 @@ def resend_pending_telemetry() -> None:
             continue
 
         try:
-            cloud_payload = {
+            item = {
                 "device_id": int(payload["device_id"]),
                 "tag_id": int(payload["tag_id"]),
                 "value": float(payload["value"]),
@@ -284,28 +273,51 @@ def resend_pending_telemetry() -> None:
             )
             continue
 
-        try:
-            post_telemetry_payload(cloud_payload)
-            mark_message_sent(message_id)
+        items.append(item)
+        valid_messages.append((message_id, item))
 
-            logger.info(
-                "Buffered telemetry sent | "
-                "message_id=%s | device_id=%s | tag_id=%s",
-                message_id,
-                cloud_payload["device_id"],
-                cloud_payload["tag_id"],
-            )
-        except requests.RequestException as error:
+    if not items:
+        return
+
+    try:
+        result = post_telemetry_batch(items)
+
+    except requests.RequestException as error:
+        logger.warning(
+            "Batch telemetry upload failed | count=%s | error=%s",
+            len(items),
+            error,
+        )
+
+        for message_id, _item in valid_messages:
             mark_message_failed(message_id, str(error))
 
-            logger.warning(
-                "Buffered telemetry resend failed | "
-                "message_id=%s | error=%s",
-                message_id,
-                error,
-            )
+        return
 
-            break
+    rejected = result.get("rejected") or []
+
+    rejected_pairs = {
+        (int(entry["device_id"]), int(entry["tag_id"]))
+        for entry in rejected
+        if "device_id" in entry and "tag_id" in entry
+    }
+
+    for message_id, item in valid_messages:
+        pair = (item["device_id"], item["tag_id"])
+
+        if pair in rejected_pairs:
+            mark_message_failed(
+                message_id,
+                "Rejected by cloud: device or tag not found",
+            )
+        else:
+            mark_message_sent(message_id)
+
+    logger.info(
+        "Batch telemetry uploaded | accepted=%s | rejected=%s",
+        result.get("accepted"),
+        len(rejected),
+    )
 
 
 def create_serial_client(connection: dict) -> ModbusSerialClient:
@@ -829,7 +841,7 @@ def main() -> None:
         )
 
     last_config_download = 0.0
-    last_buffer_resend = 0.0
+    last_batch_flush = 0.0
     last_device_status_write = 0.0
     last_commands_poll = 0.0
     last_poll_times: dict = {}
@@ -838,26 +850,31 @@ def main() -> None:
         current_time = time.monotonic()
 
         if (
-            current_time - last_buffer_resend
-            >= BUFFER_RESEND_INTERVAL_SECONDS
+            current_time - last_batch_flush
+            >= BATCH_FLUSH_INTERVAL_SECONDS
         ):
             try:
-                resend_pending_telemetry()
+                flush_pending_batch()
 
+                # Every reading passes through this queue now, so a
+                # small pending count between flushes is normal, not a
+                # problem -- only warn once the queue is growing faster
+                # than a full batch flush can drain it (a real backlog,
+                # e.g. the cloud or connection actually being down).
                 pending_count = count_pending_messages()
 
-                if pending_count:
+                if pending_count > BATCH_FLUSH_SIZE:
                     logger.warning(
-                        "Offline buffer pending=%s",
+                        "Offline buffer backlog growing | pending=%s",
                         pending_count,
                     )
             except Exception as error:
                 logger.exception(
-                    "Offline buffer resend error: %s",
+                    "Batch flush error: %s",
                     error,
                 )
 
-            last_buffer_resend = current_time
+            last_batch_flush = current_time
 
         try:
             if (

@@ -17,6 +17,7 @@ GATEWAY_KEY = os.environ.get("BBJ_GATEWAY_KEY")
 
 CONFIG_URL = f"{API_BASE_URL}/gateway/config"
 TELEMETRY_URL = f"{API_BASE_URL}/gateway/telemetry/"
+TELEMETRY_BATCH_URL = f"{API_BASE_URL}/gateway/telemetry/batch"
 HEALTH_URL = f"{API_BASE_URL}/gateway/health"
 
 CONFIG_REFRESH_SECONDS = 60
