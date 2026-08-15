@@ -19,6 +19,7 @@ from offline_buffer import (
     utc_now_iso,
 )
 import local_historian
+import edge_alarm_evaluator
 from device_status import write_device_status
 from config_cache import read_config_cache, write_config_cache
 from gateway_commands import (
@@ -247,6 +248,13 @@ def save_telemetry(
             device_id,
             tag_id,
         )
+
+    edge_alarm_evaluator.record_latest_reading(
+        device_id=device_id,
+        tag_id=tag_id,
+        value=value,
+        quality=quality,
+    )
 
 
 def flush_pending_batch() -> None:
@@ -882,6 +890,11 @@ def main() -> None:
         daemon=True,
     ).start()
 
+    threading.Thread(
+        target=edge_alarm_evaluator.evaluator_worker,
+        daemon=True,
+    ).start()
+
     configuration: dict = read_config_cache() or {}
 
     if configuration:
@@ -889,6 +902,10 @@ def main() -> None:
             "Loaded cached configuration: %s device(s)",
             configuration.get("device_count", 0),
         )
+
+    edge_alarm_evaluator.set_current_alarm_rules(
+        configuration.get("alarm_rules")
+    )
 
     last_config_download = 0.0
     last_batch_flush = 0.0
@@ -936,6 +953,10 @@ def main() -> None:
                 last_config_download = current_time
 
                 write_config_cache(configuration)
+
+                edge_alarm_evaluator.set_current_alarm_rules(
+                    configuration.get("alarm_rules")
+                )
 
                 logger.info(
                     "Configuration loaded: %s device(s)",
