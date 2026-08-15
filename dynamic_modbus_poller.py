@@ -16,7 +16,9 @@ from offline_buffer import (
     initialize_database,
     mark_message_failed,
     mark_message_sent,
+    utc_now_iso,
 )
+import local_historian
 from device_status import write_device_status
 from config_cache import read_config_cache, write_config_cache
 from gateway_commands import (
@@ -218,12 +220,33 @@ def save_telemetry(
     path, batching everything accumulated since the last flush into
     one HTTP request instead of one request per reading.
     """
+    source_timestamp = utc_now_iso()
+
     enqueue_telemetry(
         device_id=device_id,
         tag_id=tag_id,
         value=value,
         quality=quality,
+        source_timestamp=source_timestamp,
     )
+
+    # Best-effort, separate from the send-queue above -- a historian
+    # write failing must never block or fail the actual telemetry
+    # upload path.
+    try:
+        local_historian.record_reading(
+            device_id=device_id,
+            tag_id=tag_id,
+            value=value,
+            quality=quality,
+            source_timestamp=source_timestamp,
+        )
+    except Exception:
+        logger.exception(
+            "Local historian write failed | device_id=%s tag_id=%s",
+            device_id,
+            tag_id,
+        )
 
 
 def flush_pending_batch() -> None:
@@ -821,14 +844,41 @@ def run_buffer_cleanup_loop() -> None:
             )
 
 
+def run_history_cleanup_loop() -> None:
+    """
+    Periodically prune local_historian rows older than its retention
+    window. Same decoupled-thread rationale as run_buffer_cleanup_loop
+    above -- housekeeping must never compete with the poll schedule.
+    """
+    while True:
+        time.sleep(BUFFER_CLEANUP_INTERVAL_SECONDS)
+
+        try:
+            deleted_count = local_historian.prune_old_history()
+
+            if deleted_count:
+                logger.info(
+                    "Local historian cleanup removed %s old record(s)",
+                    deleted_count,
+                )
+        except Exception:
+            logger.exception("Local historian cleanup error")
+
+
 def main() -> None:
     initialize_database()
+    local_historian.initialize_database()
 
     logger.info("BBJ Sense Dynamic Gateway starting")
     logger.info("Cloud API: %s", API_BASE_URL)
 
     threading.Thread(
         target=run_buffer_cleanup_loop,
+        daemon=True,
+    ).start()
+
+    threading.Thread(
+        target=run_history_cleanup_loop,
         daemon=True,
     ).start()
 
