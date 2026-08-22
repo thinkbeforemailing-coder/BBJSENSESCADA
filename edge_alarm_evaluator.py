@@ -75,7 +75,10 @@ def _evaluate_condition(
     condition-by-condition, intentionally kept in lockstep with it --
     "anomaly" is excluded because the backend never sends anomaly
     rules to /gateway/config (they need cloud-side baseline data this
-    gateway doesn't have)."""
+    gateway doesn't have). "demand_high" is excluded for the same
+    reason: it needs a rolling average over queryable history, and
+    this evaluator only ever has the single latest in-memory reading
+    per tag."""
 
     alarm_type = rule.get("alarm_type")
     threshold = rule.get("threshold_value")
