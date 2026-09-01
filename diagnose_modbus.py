@@ -40,13 +40,24 @@ fix it.
 import argparse
 import json
 import struct
+import sys
 import time
 from pathlib import Path
 
 from pymodbus.client import ModbusSerialClient
 
 
-CONFIG_CACHE_PATH = Path(__file__).parent / "config_cache.json"
+# __file__ resolves to a temp extraction folder when this runs inside
+# a PyInstaller-frozen .exe, not the folder the .exe actually sits in
+# -- config_cache.json needs to be found next to the real .exe (or
+# this script) either way, so it's resolved off sys.executable when
+# frozen instead.
+if getattr(sys, "frozen", False):
+    _BASE_DIR = Path(sys.executable).parent
+else:
+    _BASE_DIR = Path(__file__).parent
+
+CONFIG_CACHE_PATH = _BASE_DIR / "config_cache.json"
 
 
 def normalize_parity(parity) -> str:
