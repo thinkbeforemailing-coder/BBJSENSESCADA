@@ -145,6 +145,14 @@ class ModbusGuiApp:
             self.log("Disconnected.")
         self.status_var.set("Not connected")
 
+    def _on_close(self) -> None:
+        # Closing via the window's X button bypassed the Disconnect
+        # button entirely, leaving the COM port held open on exit --
+        # the whole point of this tool is to free it for the gateway
+        # service afterward.
+        self.disconnect()
+        self.root.destroy()
+
     def list_ports(self) -> None:
         from serial.tools import list_ports as _list_ports
 
@@ -544,7 +552,8 @@ class ModbusGuiApp:
 
 def main() -> None:
     root = tk.Tk()
-    ModbusGuiApp(root)
+    app = ModbusGuiApp(root)
+    root.protocol("WM_DELETE_WINDOW", app._on_close)
     root.mainloop()
 
 

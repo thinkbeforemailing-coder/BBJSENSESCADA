@@ -14,6 +14,8 @@ from pathlib import Path
 logger = logging.getLogger("telemetry-poller.local_historian")
 
 _database_lock = threading.Lock()
+_connection: sqlite3.Connection | None = None
+_connection_path: Path | None = None
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -37,18 +39,46 @@ def utc_now_iso() -> str:
 
 
 def get_connection() -> sqlite3.Connection:
-    connection = sqlite3.connect(
+    """
+    Return the shared local SQLite connection, opening it once.
+
+    Same rationale and same safety requirement as offline_buffer.
+    get_connection() (same physical database file): every caller here
+    must hold _database_lock before calling in, since check_same_
+    thread=False only makes concurrent reuse of this one connection
+    safe because that lock fully serializes access to it. synchronous=
+    NORMAL (not FULL) is safe under WAL for the same reason it is in
+    offline_buffer.py -- durable against an app crash, only an OS
+    crash/power loss right at commit risks the single most recent
+    transaction.
+
+    Reopens if DATABASE_PATH has changed since the cached connection
+    was opened (the test suite monkeypatches it per-test) rather than
+    caching by process lifetime alone -- production never changes
+    DATABASE_PATH after startup, so this is a no-op there.
+    """
+    global _connection, _connection_path
+
+    if _connection is not None and _connection_path == DATABASE_PATH:
+        return _connection
+
+    if _connection is not None:
+        _connection.close()
+
+    _connection = sqlite3.connect(
         DATABASE_PATH,
         timeout=30,
+        check_same_thread=False,
     )
+    _connection_path = DATABASE_PATH
 
-    connection.row_factory = sqlite3.Row
+    _connection.row_factory = sqlite3.Row
 
-    connection.execute("PRAGMA journal_mode=WAL;")
-    connection.execute("PRAGMA synchronous=FULL;")
-    connection.execute("PRAGMA foreign_keys=ON;")
+    _connection.execute("PRAGMA journal_mode=WAL;")
+    _connection.execute("PRAGMA synchronous=NORMAL;")
+    _connection.execute("PRAGMA foreign_keys=ON;")
 
-    return connection
+    return _connection
 
 
 def initialize_database() -> None:
@@ -152,17 +182,24 @@ def get_recent_readings(
     oldest first. The building block edge alarm evaluation needs for
     delay_seconds handling and any future local baseline math."""
 
-    with get_connection() as connection:
-        cursor = connection.execute(
-            """
-            SELECT value, quality, source_timestamp
-            FROM telemetry_history
-            WHERE device_id = ?
-              AND tag_id = ?
-              AND source_timestamp >= ?
-            ORDER BY source_timestamp ASC
-            """,
-            (int(device_id), int(tag_id), since_iso),
-        )
+    # This previously ran unlocked against its own fresh connection --
+    # harmless when every call got a separate connection object (WAL
+    # mode lets independent connections read concurrently), but
+    # get_connection() now returns one shared connection reused across
+    # every caller, so this needs the same lock everything else here
+    # already takes to stay safe.
+    with _database_lock:
+        with get_connection() as connection:
+            cursor = connection.execute(
+                """
+                SELECT value, quality, source_timestamp
+                FROM telemetry_history
+                WHERE device_id = ?
+                  AND tag_id = ?
+                  AND source_timestamp >= ?
+                ORDER BY source_timestamp ASC
+                """,
+                (int(device_id), int(tag_id), since_iso),
+            )
 
-        return cursor.fetchall()
+            return cursor.fetchall()

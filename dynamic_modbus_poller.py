@@ -46,8 +46,17 @@ if not GATEWAY_KEY:
 
 MODBUS_TIMEOUT_SECONDS = 2
 CLIENT_CLOSE_TIMEOUT_SECONDS = 3
+CONFIG_DOWNLOAD_RETRY_INTERVAL_SECONDS = 10
 DEVICE_LOCKS = {}
 MODBUS_SERIAL_LOCK = threading.Lock()
+
+# Abandoned client.close() threads from close_client_with_timeout() below,
+# so they're tracked instead of silently leaked, and so the serial bus lock
+# being reacquired while one is still outstanding is at least logged loudly
+# -- see close_client_with_timeout()'s docstring for why they can outlive
+# the bus lock in the first place.
+_PENDING_CLOSE_THREADS: list[threading.Thread] = []
+_PENDING_CLOSE_THREADS_LOCK = threading.Lock()
 BATCH_FLUSH_INTERVAL_SECONDS = 5
 BATCH_FLUSH_SIZE = 500
 BUFFER_CLEANUP_INTERVAL_SECONDS = 3600
@@ -60,10 +69,30 @@ TCP_COMMUNICATION_TYPES = {"modbus tcp", "tcp"}
 
 DEVICE_STATUS: dict[int, str] = {}
 
+# Shared with the config-refresh thread (run_config_refresh_loop): the
+# main poll loop only ever reads this via get_current_configuration(), it
+# never downloads or writes it directly, so device polling can't be
+# blocked by a slow/failing /gateway/config request. Dict reference swaps
+# are atomic under the GIL, but the lock keeps this correct regardless of
+# that implementation detail.
+_CONFIGURATION_LOCK = threading.Lock()
+_CURRENT_CONFIGURATION: dict = {}
+
 logger = setup_logger(
     logger_name="telemetry-poller",
     log_filename="telemetry_poller.log",
 )
+
+
+def get_current_configuration() -> dict:
+    with _CONFIGURATION_LOCK:
+        return _CURRENT_CONFIGURATION
+
+
+def set_current_configuration(configuration: dict) -> None:
+    global _CURRENT_CONFIGURATION
+    with _CONFIGURATION_LOCK:
+        _CURRENT_CONFIGURATION = configuration
 
 def normalize_parity(parity: Any) -> str:
     value = str(parity or "N").strip().upper()
@@ -395,6 +424,31 @@ def create_modbus_client(
     )
 
 
+def reap_pending_close_threads() -> int:
+    """
+    Drop any previously-abandoned close threads that have since finished,
+    and return how many are still outstanding.
+
+    Doesn't join or block on anything still alive -- this is opportunistic
+    bookkeeping, called both from close_client_with_timeout() itself and
+    right after the serial bus lock is reacquired, so a still-outstanding
+    close on that same physical bus at least gets logged instead of
+    silently racing the next open.
+    """
+    with _PENDING_CLOSE_THREADS_LOCK:
+        still_alive = [t for t in _PENDING_CLOSE_THREADS if t.is_alive()]
+        finished = len(_PENDING_CLOSE_THREADS) - len(still_alive)
+        _PENDING_CLOSE_THREADS[:] = still_alive
+
+    if finished:
+        logger.info(
+            "%s previously-abandoned client.close() thread(s) finished",
+            finished,
+        )
+
+    return len(still_alive)
+
+
 def close_client_with_timeout(
     client: ModbusSerialClient | ModbusTcpClient,
 ) -> None:
@@ -408,17 +462,37 @@ def close_client_with_timeout(
     daemon thread and waiting only up to CLIENT_CLOSE_TIMEOUT_SECONDS lets
     the poll loop move on regardless; the abandoned thread finishes (or
     doesn't) on its own.
+
+    Known tradeoff: for a serial device this can run inside `with
+    MODBUS_SERIAL_LOCK:`, and that lock is released as soon as this
+    function returns -- if the close is still stuck past the timeout, the
+    lock is released while the OS handle may still be held, so the next
+    device to acquire the lock could open a new connection on the same
+    physical bus while this one is still in flight. A full fix needs the
+    lock itself to track in-flight closes, which is a bigger restructuring
+    of the locking model than this warrants right now; abandoned threads
+    are at least tracked (not leaked) and reaped opportunistically, and
+    reap_pending_close_threads() logs loudly right after the bus lock is
+    reacquired if one is still outstanding, so the race is visible instead
+    of silent.
     """
+    reap_pending_close_threads()
+
     close_thread = threading.Thread(target=client.close, daemon=True)
     close_thread.start()
     close_thread.join(timeout=CLIENT_CLOSE_TIMEOUT_SECONDS)
 
     if close_thread.is_alive():
+        with _PENDING_CLOSE_THREADS_LOCK:
+            _PENDING_CLOSE_THREADS.append(close_thread)
+
         logger.warning(
             "client.close() did not return within %ss -- abandoning it "
             "so the poll loop is not blocked; the underlying handle may "
-            "still be held by the OS",
+            "still be held by the OS. Tracking it as pending (%s total "
+            "pending close thread(s) now).",
             CLIENT_CLOSE_TIMEOUT_SECONDS,
+            len(_PENDING_CLOSE_THREADS),
         )
 
 
@@ -573,6 +647,13 @@ def run_device(
         )
 
         with bus_lock:
+
+            if is_serial and reap_pending_close_threads():
+                logger.warning(
+                    "Opening a new connection on the serial bus while a "
+                    "previous client.close() may still be in flight -- "
+                    "see close_client_with_timeout()'s docstring."
+                )
 
             client = create_modbus_client(
                 communication_type=communication_type,
@@ -771,6 +852,13 @@ def execute_command(
 
             with bus_lock:
 
+                if is_serial and reap_pending_close_threads():
+                    logger.warning(
+                        "Opening a new connection on the serial bus while "
+                        "a previous client.close() may still be in flight "
+                        "-- see close_client_with_timeout()'s docstring."
+                    )
+
                 client = create_modbus_client(
                     communication_type=communication_type,
                     connection=connection,
@@ -873,6 +961,142 @@ def run_history_cleanup_loop() -> None:
             logger.exception("Local historian cleanup error")
 
 
+def run_batch_flush_loop() -> None:
+    """
+    Periodically upload everything queued locally, on its own thread.
+
+    Same decoupled-thread rationale as run_buffer_cleanup_loop -- this
+    used to run inline in the main poll loop and could block device
+    polling for up to HTTP_TIMEOUT_SECONDS every BATCH_FLUSH_INTERVAL_
+    SECONDS on a slow-but-not-dead connection.
+    """
+    last_batch_flush = 0.0
+
+    while True:
+        current_time = time.monotonic()
+
+        if current_time - last_batch_flush >= BATCH_FLUSH_INTERVAL_SECONDS:
+            try:
+                flush_pending_batch()
+
+                # Every reading passes through this queue now, so a
+                # small pending count between flushes is normal, not a
+                # problem -- only warn once the queue is growing faster
+                # than a full batch flush can drain it (a real backlog,
+                # e.g. the cloud or connection actually being down).
+                pending_count = count_pending_messages()
+
+                if pending_count > BATCH_FLUSH_SIZE:
+                    logger.warning(
+                        "Offline buffer backlog growing | pending=%s",
+                        pending_count,
+                    )
+            except Exception as error:
+                logger.exception(
+                    "Batch flush error: %s",
+                    error,
+                )
+
+            last_batch_flush = current_time
+
+        time.sleep(0.25)
+
+
+def run_config_refresh_loop() -> None:
+    """
+    Periodically download the gateway's device/alarm configuration, on
+    its own thread -- same decoupled-thread rationale as the other loops
+    here, since this used to run inline in the main poll loop and could
+    block device polling for up to HTTP_TIMEOUT_SECONDS.
+
+    While configuration is still empty (no cache, or every attempt so
+    far has failed), retries every CONFIG_DOWNLOAD_RETRY_INTERVAL_SECONDS
+    instead of every loop iteration -- previously "not configuration" was
+    unconditionally true in that state, so a persistently failing
+    /gateway/config got hammered on essentially every 0.25s main-loop
+    tick instead of backing off.
+    """
+    last_config_download = 0.0
+
+    while True:
+        current_time = time.monotonic()
+        configuration = get_current_configuration()
+
+        retry_interval = (
+            CONFIG_REFRESH_SECONDS
+            if configuration
+            else CONFIG_DOWNLOAD_RETRY_INTERVAL_SECONDS
+        )
+
+        if current_time - last_config_download >= retry_interval:
+            last_config_download = current_time
+
+            try:
+                configuration = download_configuration()
+                set_current_configuration(configuration)
+
+                write_config_cache(configuration)
+
+                edge_alarm_evaluator.set_current_alarm_rules(
+                    configuration.get("alarm_rules")
+                )
+
+                logger.info(
+                    "Configuration loaded: %s device(s)",
+                    configuration.get("device_count", 0),
+                )
+            except requests.RequestException as error:
+                logger.error(
+                    "Cloud API connection error: %s",
+                    error,
+                )
+            except Exception as error:
+                logger.exception(
+                    "Configuration download error: %s",
+                    error,
+                )
+
+        time.sleep(1)
+
+
+def run_commands_loop() -> None:
+    """
+    Periodically fetch and execute pending remote commands, on its own
+    thread -- same decoupled-thread rationale as the other loops here.
+    """
+    last_commands_poll = 0.0
+
+    while True:
+        current_time = time.monotonic()
+
+        if (
+            current_time - last_commands_poll
+            >= COMMANDS_POLL_INTERVAL_SECONDS
+        ):
+            last_commands_poll = current_time
+
+            try:
+                pending_commands = fetch_pending_commands()
+
+                for command in pending_commands:
+                    execute_command(
+                        command=command,
+                        configuration=get_current_configuration(),
+                    )
+            except requests.RequestException as error:
+                logger.error(
+                    "Cloud API connection error: %s",
+                    error,
+                )
+            except Exception as error:
+                logger.exception(
+                    "Command processing error: %s",
+                    error,
+                )
+
+        time.sleep(0.25)
+
+
 def main() -> None:
     initialize_database()
     local_historian.initialize_database()
@@ -903,66 +1127,42 @@ def main() -> None:
             configuration.get("device_count", 0),
         )
 
+    set_current_configuration(configuration)
+
     edge_alarm_evaluator.set_current_alarm_rules(
         configuration.get("alarm_rules")
     )
 
-    last_config_download = 0.0
-    last_batch_flush = 0.0
+    # Batch flush, config refresh, and commands all used to run inline
+    # here, each capable of blocking device polling for up to
+    # HTTP_TIMEOUT_SECONDS on a slow-but-not-dead connection -- exactly
+    # what save_telemetry()'s local queue exists to avoid on the
+    # telemetry-upload path specifically. Same fix applied to the rest
+    # of this loop's own network calls: each now runs on its own
+    # decoupled thread, same rationale as run_buffer_cleanup_loop.
+    threading.Thread(
+        target=run_batch_flush_loop,
+        daemon=True,
+    ).start()
+
+    threading.Thread(
+        target=run_config_refresh_loop,
+        daemon=True,
+    ).start()
+
+    threading.Thread(
+        target=run_commands_loop,
+        daemon=True,
+    ).start()
+
     last_device_status_write = 0.0
-    last_commands_poll = 0.0
     last_poll_times: dict = {}
 
     while True:
         current_time = time.monotonic()
-
-        if (
-            current_time - last_batch_flush
-            >= BATCH_FLUSH_INTERVAL_SECONDS
-        ):
-            try:
-                flush_pending_batch()
-
-                # Every reading passes through this queue now, so a
-                # small pending count between flushes is normal, not a
-                # problem -- only warn once the queue is growing faster
-                # than a full batch flush can drain it (a real backlog,
-                # e.g. the cloud or connection actually being down).
-                pending_count = count_pending_messages()
-
-                if pending_count > BATCH_FLUSH_SIZE:
-                    logger.warning(
-                        "Offline buffer backlog growing | pending=%s",
-                        pending_count,
-                    )
-            except Exception as error:
-                logger.exception(
-                    "Batch flush error: %s",
-                    error,
-                )
-
-            last_batch_flush = current_time
+        configuration = get_current_configuration()
 
         try:
-            if (
-                not configuration
-                or current_time - last_config_download
-                >= CONFIG_REFRESH_SECONDS
-            ):
-                configuration = download_configuration()
-                last_config_download = current_time
-
-                write_config_cache(configuration)
-
-                edge_alarm_evaluator.set_current_alarm_rules(
-                    configuration.get("alarm_rules")
-                )
-
-                logger.info(
-                    "Configuration loaded: %s device(s)",
-                    configuration.get("device_count", 0),
-                )
-
             for device in configuration.get("devices", []):
                 try:
                     run_device(
@@ -989,32 +1189,6 @@ def main() -> None:
                     )
 
                 last_device_status_write = current_time
-
-            if (
-                current_time - last_commands_poll
-                >= COMMANDS_POLL_INTERVAL_SECONDS
-            ):
-                try:
-                    pending_commands = fetch_pending_commands()
-
-                    for command in pending_commands:
-                        execute_command(
-                            command=command,
-                            configuration=configuration,
-                        )
-                except Exception as error:
-                    logger.exception(
-                        "Command processing error: %s",
-                        error,
-                    )
-
-                last_commands_poll = current_time
-
-        except requests.RequestException as error:
-            logger.error(
-                "Cloud API connection error: %s",
-                error,
-            )
 
         except Exception as error:
             logger.exception(

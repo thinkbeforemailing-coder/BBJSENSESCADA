@@ -160,6 +160,16 @@ def list_ports() -> None:
         print(f"  {port.device}  {port.description}")
 
 
+def format_tag_field(value) -> str:
+    """
+    Stringify a tag config field (display_name, register_address, ...)
+    for a `:<N`-padded print line without ever handing None to the
+    format spec -- `f"{None:<6}"` raises TypeError, which used to crash
+    the whole scan on one malformed tag instead of just reporting it.
+    """
+    return str(value) if value is not None else "?"
+
+
 def read_one_register(
     client: ModbusSerialClient,
     slave_id: int,
@@ -224,6 +234,12 @@ def run_config_scan() -> None:
             count = tag.get("register_count") or 2
             function_code = int(tag.get("function_code") or 3)
 
+            # Both can legitimately be None/missing on a malformed tag
+            # config -- stringify up front so a bad tag can't crash the
+            # whole scan via `:<N` formatting None (TypeError).
+            display_name = format_tag_field(tag.get("display_name"))
+            address_str = format_tag_field(address)
+
             started = time.monotonic()
 
             try:
@@ -234,8 +250,8 @@ def run_config_scan() -> None:
 
                 if result.isError():
                     print(
-                        f"  FAIL  {tag.get('display_name'):<20} "
-                        f"addr={address:<6} -- {result}"
+                        f"  FAIL  {display_name:<20} "
+                        f"addr={address_str:<6} -- {result}"
                     )
                     continue
 
@@ -252,16 +268,16 @@ def run_config_scan() -> None:
                 )
 
                 print(
-                    f"  OK    {tag.get('display_name'):<20} "
-                    f"addr={address:<6} raw={registers} "
+                    f"  OK    {display_name:<20} "
+                    f"addr={address_str:<6} raw={registers} "
                     f"value={scaled:.3f} {tag.get('unit') or ''} "
                     f"({elapsed_ms:.0f} ms)"
                 )
 
             except Exception as error:
                 print(
-                    f"  ERROR {tag.get('display_name'):<20} "
-                    f"addr={address:<6} -- {error}"
+                    f"  ERROR {display_name:<20} "
+                    f"addr={address_str:<6} -- {error}"
                 )
 
         client.close()

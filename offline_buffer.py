@@ -20,6 +20,8 @@ DATABASE_PATH = BASE_DIR / "gateway_buffer.db"
 logger = logging.getLogger("telemetry-poller.offline_buffer")
 
 _database_lock = threading.Lock()
+_connection: sqlite3.Connection | None = None
+_connection_path: Path | None = None
 
 
 def utc_now_iso() -> str:
@@ -29,31 +31,67 @@ def utc_now_iso() -> str:
 
 def get_connection() -> sqlite3.Connection:
     """
-    Open the local SQLite database.
+    Return the shared local SQLite connection, opening it once.
 
-    WAL mode provides better reliability when the gateway
-    reads and writes the buffer at the same time.
+    Every caller in this module does `with _database_lock: with
+    get_connection() as connection:` -- `with connection:` only manages
+    the transaction (commit/rollback), it never closes the connection,
+    so this used to open (and never explicitly close) a brand-new
+    connection plus reissue every PRAGMA below on every single call --
+    called twice per telemetry reading via
+    dynamic_modbus_poller.save_telemetry. _database_lock already
+    serializes every access, so one long-lived connection, reused for
+    the life of the process, is safe here; check_same_thread=False is
+    only safe *because* of that serialization -- don't touch this
+    connection anywhere the lock isn't held. Relies on
+    initialize_database() being called once at startup before any
+    other thread reaches this function (main() does exactly that),
+    since the lazy check below isn't itself lock-protected (it can't
+    be -- every caller already holds _database_lock before calling in).
+
+    Reopens if DATABASE_PATH has changed since the cached connection
+    was opened (the test suite monkeypatches it per-test via
+    initialize_database()) rather than caching by process lifetime
+    alone -- production never changes DATABASE_PATH after startup, so
+    this is a no-op there.
+
+    WAL mode provides better reliability when the gateway reads and
+    writes the buffer at the same time. synchronous=NORMAL is safe
+    under WAL -- durable against an application crash; only an OS
+    crash or power loss at the moment of commit could lose the single
+    most recent transaction -- without forcing a full fsync on every
+    write the way synchronous=FULL does.
     """
-    connection = sqlite3.connect(
+    global _connection, _connection_path
+
+    if _connection is not None and _connection_path == DATABASE_PATH:
+        return _connection
+
+    if _connection is not None:
+        _connection.close()
+
+    _connection = sqlite3.connect(
         DATABASE_PATH,
         timeout=30,
+        check_same_thread=False,
     )
+    _connection_path = DATABASE_PATH
 
-    connection.row_factory = sqlite3.Row
+    _connection.row_factory = sqlite3.Row
 
-    connection.execute(
+    _connection.execute(
         "PRAGMA journal_mode=WAL;"
     )
 
-    connection.execute(
-        "PRAGMA synchronous=FULL;"
+    _connection.execute(
+        "PRAGMA synchronous=NORMAL;"
     )
 
-    connection.execute(
+    _connection.execute(
         "PRAGMA foreign_keys=ON;"
     )
 
-    return connection
+    return _connection
 
 
 def initialize_database() -> None:
