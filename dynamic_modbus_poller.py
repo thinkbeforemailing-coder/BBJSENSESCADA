@@ -37,6 +37,7 @@ from settings import (
     GATEWAY_KEY,
     HTTP_TIMEOUT_SECONDS,
     TELEMETRY_BATCH_URL,
+    WORD_ORDER_OVERRIDES,
 )
 
 
@@ -580,6 +581,43 @@ def read_modbus_registers(
     return list(result.registers)
 
 
+_WORD_ORDER_OVERRIDE_WARNED: set[int] = set()
+
+
+def resolve_word_order(tag: dict) -> str:
+    """
+    The tag's word_order from the cloud, unless BBJ_WORD_ORDER_OVERRIDES
+    names this tag ID -- a stopgap for the backend not saving word_order
+    edits. Remove the override once the cloud sends the right value.
+    """
+    cloud_word_order = tag.get("word_order", "swapped")
+    tag_id = int(tag["id"])
+
+    if tag_id not in WORD_ORDER_OVERRIDES:
+        return cloud_word_order
+
+    override = WORD_ORDER_OVERRIDES[tag_id]
+
+    # Once per tag, not per poll.
+    if tag_id not in _WORD_ORDER_OVERRIDE_WARNED:
+        _WORD_ORDER_OVERRIDE_WARNED.add(tag_id)
+        logger.warning(
+            "Tag=%s (id=%s) | word_order overridden by "
+            "BBJ_WORD_ORDER_OVERRIDES: cloud=%s -> using=%s%s",
+            tag.get("display_name"),
+            tag_id,
+            cloud_word_order,
+            override,
+            (
+                " | cloud now agrees, override can be removed"
+                if is_word_swapped(cloud_word_order) == is_word_swapped(override)
+                else ""
+            ),
+        )
+
+    return override
+
+
 def process_tag(
     client: ModbusSerialClient | ModbusTcpClient,
     device: dict,
@@ -601,7 +639,7 @@ def process_tag(
         registers=registers,
         data_type=tag.get("data_type", "float32"),
         byte_order=tag.get("byte_order", "big"),
-        word_order=tag.get("word_order", "swapped"),
+        word_order=resolve_word_order(tag),
     )
 
     scale = float(tag.get("scale") or 1.0)

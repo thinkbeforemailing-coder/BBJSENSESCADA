@@ -48,6 +48,7 @@ All runtime configuration is via environment variables — nothing is hardcoded 
 | `BBJ_GATEWAY_ID` | No | `BBJ-GW-001-v2` | This gateway's identity, used in health reports and command polling. |
 | `BBJ_GATEWAY_NAME` | No | `BBJ Windows Gateway 01` | Display name in health reports. |
 | `BBJ_DEFAULT_SERIAL_PORT` | No | none | Workaround: COM port used for a serial device whose `serial_port` arrives empty from `/gateway/config`. Never overrides a port the cloud does send; logs a warning once per device when used. |
+| `BBJ_WORD_ORDER_OVERRIDES` | No | none | Workaround: forces `word_order` per tag ID, e.g. `23:swapped,24:swapped`, **ignoring** what `/gateway/config` sends. Logs a warning once per tag, noting when the cloud value already agrees so the override can be removed. |
 
 Device and tag configuration (Modbus addresses, data types, poll intervals, scaling, `writable` flags) is **not** stored in this repo — it's pulled from the backend's `/gateway/config` endpoint every 60 seconds and cached locally for resilience.
 
