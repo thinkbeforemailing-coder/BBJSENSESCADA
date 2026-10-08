@@ -132,6 +132,26 @@ def swap_bytes_in_words(registers: list[int]) -> list[int]:
     return result
 
 
+# Spellings meaning "low word first" (CDAB for float32). Normalized by
+# is_word_swapped(), so "Swap / Little Word" arrives as "swap little word".
+SWAPPED_WORD_ORDERS = {
+    "swapped", "swap", "little", "reverse", "cdab",
+    "little word", "swap little word", "word swap", "word swapped",
+}
+
+
+def is_word_swapped(word_order) -> bool:
+    normalized = " ".join(
+        str(word_order or "")
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("/", " ")
+        .split()
+    )
+    return normalized in SWAPPED_WORD_ORDERS
+
+
 def prepare_registers(
     registers: list[int],
     byte_order: str,
@@ -139,7 +159,7 @@ def prepare_registers(
 ) -> list[int]:
     prepared = list(registers)
 
-    if str(word_order).lower() in {"swapped", "little", "reverse"}:
+    if is_word_swapped(word_order):
         prepared.reverse()
 
     if str(byte_order).lower() in {"little", "swapped"}:

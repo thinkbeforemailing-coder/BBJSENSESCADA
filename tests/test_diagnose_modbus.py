@@ -35,6 +35,9 @@ def test_prepare_registers_matches_poller():
         ([1, 2, 3, 4], "big", "swapped"),
         ([0x1234, 0x5678], "little", "normal"),
         ([0x1234, 0x5678], "swapped", "swapped"),
+        ([1, 2], "big", "Swap / Little Word"),
+        ([1, 2], "big", "CDAB"),
+        ([1, 2], "big", "little_word"),
     ]
 
     for registers, byte_order, word_order in cases:
