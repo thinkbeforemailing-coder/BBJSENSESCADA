@@ -32,6 +32,7 @@ from settings import (
     API_BASE_URL,
     CONFIG_REFRESH_SECONDS,
     CONFIG_URL,
+    DEFAULT_SERIAL_PORT,
     GATEWAY_KEY,
     HTTP_TIMEOUT_SECONDS,
     TELEMETRY_BATCH_URL,
@@ -380,11 +381,40 @@ def flush_pending_batch() -> None:
     )
 
 
-def create_serial_client(connection: dict) -> ModbusSerialClient:
-    serial_port = connection.get("serial_port")
+_DEFAULT_PORT_WARNED: set[str] = set()
 
-    if not serial_port:
-        raise ValueError("Serial port is not configured")
+
+def resolve_serial_port(connection: dict, device_name: str = "") -> str:
+    """
+    The configured serial_port, or BBJ_DEFAULT_SERIAL_PORT if the cloud
+    sent it empty. The fallback is a stopgap for the backend not
+    returning serial_port; it never overrides a port the cloud did send.
+    """
+    serial_port = str(connection.get("serial_port") or "").strip()
+
+    if serial_port:
+        return serial_port
+
+    if DEFAULT_SERIAL_PORT:
+        # Once per device, not per poll -- this runs every cycle.
+        if device_name not in _DEFAULT_PORT_WARNED:
+            _DEFAULT_PORT_WARNED.add(device_name)
+            logger.warning(
+                "Device=%s | serial_port empty in cloud config | "
+                "using BBJ_DEFAULT_SERIAL_PORT=%s",
+                device_name or "?",
+                DEFAULT_SERIAL_PORT,
+            )
+        return DEFAULT_SERIAL_PORT
+
+    raise ValueError("Serial port is not configured")
+
+
+def create_serial_client(
+    connection: dict,
+    device_name: str = "",
+) -> ModbusSerialClient:
+    serial_port = resolve_serial_port(connection, device_name)
 
     return ModbusSerialClient(
         port=str(serial_port),
@@ -412,9 +442,10 @@ def create_tcp_client(connection: dict) -> ModbusTcpClient:
 def create_modbus_client(
     communication_type: str,
     connection: dict,
+    device_name: str = "",
 ) -> ModbusSerialClient | ModbusTcpClient:
     if communication_type in RTU_COMMUNICATION_TYPES:
-        return create_serial_client(connection)
+        return create_serial_client(connection, device_name)
 
     if communication_type in TCP_COMMUNICATION_TYPES:
         return create_tcp_client(connection)
@@ -658,6 +689,7 @@ def run_device(
             client = create_modbus_client(
                 communication_type=communication_type,
                 connection=connection,
+                device_name=str(device.get("device_name") or ""),
             )
 
             if not client.connect():
@@ -862,6 +894,7 @@ def execute_command(
                 client = create_modbus_client(
                     communication_type=communication_type,
                     connection=connection,
+                    device_name=str(device.get("device_name") or ""),
                 )
 
                 if not client.connect():

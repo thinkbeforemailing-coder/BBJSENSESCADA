@@ -15,6 +15,10 @@ GATEWAY_NAME = os.environ.get(
 
 GATEWAY_KEY = os.environ.get("BBJ_GATEWAY_KEY")
 
+# Workaround: used only when /gateway/config sends a serial device
+# with an empty serial_port (backend not saving/returning it).
+DEFAULT_SERIAL_PORT = os.environ.get("BBJ_DEFAULT_SERIAL_PORT", "").strip()
+
 CONFIG_URL = f"{API_BASE_URL}/gateway/config"
 TELEMETRY_URL = f"{API_BASE_URL}/gateway/telemetry/"
 TELEMETRY_BATCH_URL = f"{API_BASE_URL}/gateway/telemetry/batch"

@@ -47,6 +47,7 @@ All runtime configuration is via environment variables — nothing is hardcoded 
 | `BBJ_API_BASE_URL` | No | `http://34.131.199.29:8000` | Backend base URL. |
 | `BBJ_GATEWAY_ID` | No | `BBJ-GW-001-v2` | This gateway's identity, used in health reports and command polling. |
 | `BBJ_GATEWAY_NAME` | No | `BBJ Windows Gateway 01` | Display name in health reports. |
+| `BBJ_DEFAULT_SERIAL_PORT` | No | none | Workaround: COM port used for a serial device whose `serial_port` arrives empty from `/gateway/config`. Never overrides a port the cloud does send; logs a warning once per device when used. |
 
 Device and tag configuration (Modbus addresses, data types, poll intervals, scaling, `writable` flags) is **not** stored in this repo — it's pulled from the backend's `/gateway/config` endpoint every 60 seconds and cached locally for resilience.
 
