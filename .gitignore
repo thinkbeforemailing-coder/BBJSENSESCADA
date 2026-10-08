@@ -15,7 +15,7 @@ config_cache.json.tmp
 .pytest_cache/
 
 # PyInstaller build output -- rebuild with:
-#   venv\Scripts\pyinstaller.exe --onefile --windowed --name "BBJ-Modbus-Tester" modbus_gui.py
+#   .venv\Scripts\pyinstaller.exe --onefile --windowed --name "BBJ-Modbus-Tester" --workpath build_pyinstaller modbus_gui.py
 # then move dist\BBJ-Modbus-Tester.exe next to config_cache.json.
 dist/
 build_pyinstaller/

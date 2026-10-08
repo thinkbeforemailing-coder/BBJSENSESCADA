@@ -29,20 +29,19 @@ import json
 import time
 import tkinter as tk
 from datetime import datetime
-from pathlib import Path
 from tkinter import ttk
 
 from pymodbus.client import ModbusSerialClient
 
+# CONFIG_CACHE_PATH comes from diagnose_modbus so it resolves next to
+# the real .exe when PyInstaller-frozen, not the temp extraction dir.
 from diagnose_modbus import (
+    CONFIG_CACHE_PATH,
     decode_registers,
     normalize_parity,
     normalize_stop_bits,
     read_one_register,
 )
-
-
-CONFIG_CACHE_PATH = Path(__file__).parent / "config_cache.json"
 
 
 class ModbusGuiApp:
@@ -122,6 +121,9 @@ class ModbusGuiApp:
             stopbits=normalize_stop_bits(self.stopbits_var.get()),
             bytesize=8,
             timeout=2,
+            # pymodbus defaults to 3 retries, so every silent slave ID
+            # in a discovery scan would cost ~8 s instead of ~2 s.
+            retries=0,
         )
 
         if not client.connect():
@@ -278,7 +280,9 @@ class ModbusGuiApp:
                 # Timeout / no response -- nothing at this ID.
                 pass
 
-            self.root.update_idletasks()
+            # update() (not update_idletasks) also pumps input events,
+            # so Windows doesn't flag the window "Not Responding".
+            self.root.update()
 
         if not found_any:
             self.log(
