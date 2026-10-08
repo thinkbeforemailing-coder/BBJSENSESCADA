@@ -61,10 +61,12 @@ The gateway runs under [NSSM](https://nssm.cc/), pointed at `start_gateway.py`. 
 
 To install the service fresh (if it doesn't exist yet):
 ```powershell
-& "C:\nssm\win64\nssm.exe" install "BBJ Sense Gateway" "C:\bbj-sense-gateway\venv\Scripts\python.exe" "-u" "C:\bbj-sense-gateway\start_gateway.py"
+& "C:\nssm\win64\nssm.exe" install "BBJ Sense Gateway" "C:\bbj-sense-gateway\.venv\Scripts\python.exe" "-u" "C:\bbj-sense-gateway\start_gateway.py"
 & "C:\nssm\win64\nssm.exe" set "BBJ Sense Gateway" AppDirectory "C:\bbj-sense-gateway"
 & "C:\nssm\win64\nssm.exe" set "BBJ Sense Gateway" AppEnvironmentExtra "BBJ_GATEWAY_KEY=<your key>"
 & "C:\nssm\win64\nssm.exe" set "BBJ Sense Gateway" Start SERVICE_AUTO_START
+& "C:\nssm\win64\nssm.exe" set "BBJ Sense Gateway" AppStdout "C:\bbj-sense-gateway\logs\service_stdout.log"
+& "C:\nssm\win64\nssm.exe" set "BBJ Sense Gateway" AppStderr "C:\bbj-sense-gateway\logs\service_stderr.log"
 ```
 
 ## Logs
@@ -76,14 +78,15 @@ All logs rotate at 5MB with 5 backups, under `logs/`:
 | `telemetry_poller.log` | `dynamic_modbus_poller.py` and its helper modules (offline buffer, config cache, commands) |
 | `gateway_health.log` | `gateway_health_reporter.py` and `device_status.py` |
 | `startup_manager.log` | `start_gateway.py` (process start/stop/restart events, watchdog activity) |
+| `service_stdout.log` / `service_stderr.log` | NSSM -- raw console output of the service, including crashes before logging is set up (not rotated) |
 
 The `%(name)s` field in each log line identifies the specific subsystem (e.g. `bbj-sense-offline-buffer`, `bbj-sense-gateway-commands`) even when multiple modules share one file.
 
 ## Running tests
 
 ```powershell
-venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pytest
 ```
 
 **Do not run `pytest` without the `tests/` scoping in `pytest.ini`.** The repo root also contains several `test_*.py` files (`test_current.py`, `test_modbus_driver.py`, etc.) — these are manual, one-off hardware-scanning scripts that open the real serial port on import, not actual tests. `pytest.ini` restricts discovery to `tests/` specifically so these never get collected.
