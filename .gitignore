@@ -9,6 +9,7 @@ logs/
 gateway_buffer.db
 gateway_buffer.db-shm
 gateway_buffer.db-wal
+db_backup_*/
 device_status.json
 device_status.json.tmp
 config_cache.json
