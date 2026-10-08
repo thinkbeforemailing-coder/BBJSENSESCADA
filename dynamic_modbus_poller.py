@@ -1,5 +1,6 @@
 import contextlib
 from logging_config import setup_logger
+import math
 import struct
 import time
 import threading
@@ -589,6 +590,20 @@ def process_tag(
 
     decimal_places = int(tag.get("decimal_places") or 0)
     final_value = round(final_value, decimal_places)
+
+    # NaN/inf bit patterns (typically a wrong word/byte order) can't be
+    # stored -- SQLite turns NaN into NULL and the queue's NOT NULL
+    # constraint rejects it -- and mean nothing on a dashboard anyway.
+    if not math.isfinite(final_value):
+        logger.warning(
+            "Device=%s | Tag=%s | Skipped non-finite value=%s | Raw=%s "
+            "| check data_type/byte_order/word_order",
+            device.get("device_name"),
+            tag.get("display_name"),
+            final_value,
+            registers,
+        )
+        return
 
     minimum_value = tag.get("minimum_value")
     maximum_value = tag.get("maximum_value")
